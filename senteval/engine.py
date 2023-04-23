@@ -29,6 +29,7 @@ class SE(object):
         params = utils.dotdict(params)
         params.usepytorch = True if 'usepytorch' not in params else params.usepytorch
         params.seed = 1111 if 'seed' not in params else params.seed
+        params.device = 'cpu' if 'device' not in params else params.device
 
         params.batch_size = 128 if 'batch_size' not in params else params.batch_size
         params.nhid = 0 if 'nhid' not in params else params.nhid

@@ -23,6 +23,7 @@ assert(sklearn.__version__ >= "0.18.0"), \
     "need to update sklearn to version >= 0.18.0"
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
+import torch
 
 
 def get_classif_name(classifier_config, usepytorch):
@@ -35,6 +36,7 @@ def get_classif_name(classifier_config, usepytorch):
         modelname = 'pytorch-MLP-nhid%s-%s-bs%s' % (nhid, optim, bs)
     return modelname
 
+
 # Pytorch version
 class InnerKFoldClassifier(object):
     """
@@ -46,6 +48,7 @@ class InnerKFoldClassifier(object):
         self.featdim = X.shape[1]
         self.nclasses = config['nclasses']
         self.seed = config['seed']
+        self.max_iter = config['max_iter']
         self.devresults = []
         self.testresults = []
         self.usepytorch = config['usepytorch']
@@ -75,15 +78,18 @@ class InnerKFoldClassifier(object):
                     X_in_train, X_in_test = X_train[inner_train_idx], X_train[inner_test_idx]
                     y_in_train, y_in_test = y_train[inner_train_idx], y_train[inner_test_idx]
                     if self.usepytorch:
+                        X_in_train, X_in_test = torch.from_numpy(X_in_train).float(), torch.from_numpy(X_in_test).float()
+                        y_in_train, y_in_test = torch.from_numpy(y_in_train).long(), torch.from_numpy(y_in_test).long()
                         clf = MLP(self.classifier_config, inputdim=self.featdim,
                                   nclasses=self.nclasses, l2reg=reg,
                                   seed=self.seed)
                         clf.fit(X_in_train, y_in_train,
                                 validation_data=(X_in_test, y_in_test))
+                        regscores.append(clf.score(X_in_test, y_in_test))
                     else:
                         clf = LogisticRegression(C=reg, random_state=self.seed)
                         clf.fit(X_in_train, y_in_train)
-                    regscores.append(clf.score(X_in_test, y_in_test))
+                        regscores.append(clf.score(X_in_test, y_in_test))
                 scores.append(round(100*np.mean(regscores), 2))
             optreg = regs[np.argmax(scores)]
             logging.info('Best param found at split {0}: l2reg = {1} \
@@ -94,13 +100,18 @@ class InnerKFoldClassifier(object):
                 clf = MLP(self.classifier_config, inputdim=self.featdim,
                           nclasses=self.nclasses, l2reg=optreg,
                           seed=self.seed)
-
+                X_train = torch.from_numpy(X_train).float()
+                y_train = torch.from_numpy(y_train).long()
                 clf.fit(X_train, y_train, validation_split=0.05)
+
+                X_test = torch.from_numpy(X_test).float()
+                y_test = torch.from_numpy(y_test).long()
             else:
                 clf = LogisticRegression(C=optreg, random_state=self.seed)
                 clf.fit(X_train, y_train)
 
-            self.testresults.append(round(100*clf.score(X_test, y_test), 2))
+            test_score = clf.score(X_test, y_test)
+            self.testresults.append(round(100*test_score, 2))
 
         devaccuracy = round(np.mean(self.devresults), 2)
         testaccuracy = round(np.mean(self.testresults), 2)
@@ -147,6 +158,8 @@ class KFoldClassifier(object):
                     clf = MLP(self.classifier_config, inputdim=self.featdim,
                               nclasses=self.nclasses, l2reg=reg,
                               seed=self.seed)
+                    X_train, y_train = torch.from_numpy(X_train).float(), torch.from_numpy(y_train).long()
+                    X_test, y_test = torch.from_numpy(X_test).float(), torch.from_numpy(y_test).long()
                     clf.fit(X_train, y_train, validation_data=(X_test, y_test))
                 else:
                     clf = LogisticRegression(C=reg, random_state=self.seed)
@@ -169,13 +182,19 @@ class KFoldClassifier(object):
             clf = MLP(self.classifier_config, inputdim=self.featdim,
                       nclasses=self.nclasses, l2reg=optreg,
                       seed=self.seed)
-            clf.fit(self.train['X'], self.train['y'], validation_split=0.05)
+
+            X_train, y_train = torch.from_numpy(self.train['X']).float(), torch.from_numpy(self.train['y']).long()
+            clf.fit(X_train, y_train, validation_split=0.05)
+
+            X_test = torch.from_numpy(self.test['X']).float()
+            y_test = torch.from_numpy(self.test['y']).long()
+            testaccuracy = clf.score(X_test, y_test)
         else:
             clf = LogisticRegression(C=optreg, random_state=self.seed)
             clf.fit(self.train['X'], self.train['y'])
-        yhat = clf.predict(self.test['X'])
+            testaccuracy = clf.score(self.test['X'], self.test['y'])
 
-        testaccuracy = clf.score(self.test['X'], self.test['y'])
+        yhat = clf.predict(X_test)
         testaccuracy = round(100*testaccuracy, 2)
 
         return devaccuracy, testaccuracy, yhat
@@ -193,8 +212,7 @@ class SplitClassifier(object):
         self.seed = config['seed']
         self.usepytorch = config['usepytorch']
         self.classifier_config = config['classifier']
-        self.cudaEfficient = False if 'cudaEfficient' not in config else \
-            config['cudaEfficient']
+        self.device = 'cpu' if 'device' not in config else config['device']
         self.modelname = get_classif_name(self.classifier_config, self.usepytorch)
         self.noreg = False if 'noreg' not in config else config['noreg']
         self.config = config
@@ -211,36 +229,51 @@ class SplitClassifier(object):
             if self.usepytorch:
                 clf = MLP(self.classifier_config, inputdim=self.featdim,
                           nclasses=self.nclasses, l2reg=reg,
-                          seed=self.seed, cudaEfficient=self.cudaEfficient)
+                          seed=self.seed, device=self.device)
 
                 # TODO: Find a hack for reducing nb epoches in SNLI
-                clf.fit(self.X['train'], self.y['train'],
-                        validation_data=(self.X['valid'], self.y['valid']))
+                X_train = torch.from_numpy(self.X['train']).float()
+                y_train = torch.from_numpy(self.y['train']).long()
+                X_val = torch.from_numpy(self.X['valid']).float()
+                y_val = torch.from_numpy(self.y['valid']).long()
+                clf.fit(X_train, y_train,
+                        validation_data=(X_val, y_val))
+
             else:
                 clf = LogisticRegression(C=reg, random_state=self.seed)
                 clf.fit(self.X['train'], self.y['train'])
-            scores.append(round(100*clf.score(self.X['valid'],
-                                self.y['valid']), 2))
+                X_val, y_val = self.X['valid'], self.y['valid']
+            scores.append(round(100*clf.score(X_val,
+                                y_val), 2))
         logging.info([('reg:'+str(regs[idx]), scores[idx])
                       for idx in range(len(scores))])
         optreg = regs[np.argmax(scores)]
         devaccuracy = np.max(scores)
         logging.info('Validation : best param found is reg = {0} with score \
             {1}'.format(optreg, devaccuracy))
-        clf = LogisticRegression(C=optreg, random_state=self.seed)
+
         logging.info('Evaluating...')
         if self.usepytorch:
             clf = MLP(self.classifier_config, inputdim=self.featdim,
                       nclasses=self.nclasses, l2reg=optreg,
-                      seed=self.seed, cudaEfficient=self.cudaEfficient)
+                      seed=self.seed, device=self.device)
 
             # TODO: Find a hack for reducing nb epoches in SNLI
-            clf.fit(self.X['train'], self.y['train'],
-                    validation_data=(self.X['valid'], self.y['valid']))
+            X_train = torch.from_numpy(self.X['train']).float()
+            y_train = torch.from_numpy(self.y['train']).long()
+            X_val = torch.from_numpy(self.X['valid']).float()
+            y_val = torch.from_numpy(self.y['valid']).long()
+            clf.fit(X_train, y_train,
+                    validation_data=(X_val, y_val))
+
+            X_test = torch.from_numpy(self.X['test']).float()
+            y_test = torch.from_numpy(self.y['test']).long()
         else:
             clf = LogisticRegression(C=optreg, random_state=self.seed)
             clf.fit(self.X['train'], self.y['train'])
+            X_test = self.X['test']
+            y_test = self.y['test']
 
-        testaccuracy = clf.score(self.X['test'], self.y['test'])
+        testaccuracy = clf.score(X_test, y_test)
         testaccuracy = round(100*testaccuracy, 2)
         return devaccuracy, testaccuracy

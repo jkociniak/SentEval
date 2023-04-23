@@ -29,18 +29,17 @@ class STSEval(object):
         self.samples = []
 
         for dataset in self.datasets:
-            sent1, sent2 = zip(*[l.split("\t") for l in
-                               io.open(fpath + '/STS.input.%s.txt' % dataset,
-                                       encoding='utf8').read().splitlines()])
-            raw_scores = np.array([x for x in
-                                   io.open(fpath + '/STS.gs.%s.txt' % dataset,
-                                           encoding='utf8')
-                                   .read().splitlines()])
+            with open(fpath + '/STS.input.%s.txt' % dataset, encoding='utf8') as f:
+                sent1, sent2 = zip(*[l.split("\t") for l in f.read().splitlines()])
+
+            with open(fpath + '/STS.gs.%s.txt' % dataset, encoding='utf8') as f:
+                raw_scores = np.array([x for x in f.read().splitlines()])
+
             not_empty_idx = raw_scores != ''
 
             gs_scores = [float(x) for x in raw_scores[not_empty_idx]]
-            sent1 = np.array([s.split() for s in sent1])[not_empty_idx]
-            sent2 = np.array([s.split() for s in sent2])[not_empty_idx]
+            sent1 = np.array([s.split() for s in sent1], dtype=object)[not_empty_idx]
+            sent2 = np.array([s.split() for s in sent2], dtype=object)[not_empty_idx]
             # sort data by length to minimize padding in batcher
             sorted_data = sorted(zip(sent1, sent2, gs_scores),
                                  key=lambda z: (len(z[0]), len(z[1]), z[2]))
